@@ -42,6 +42,16 @@ def get_openai_embedding(text):
         logger.error(traceback.format_exc())
         return None
 
+def create_sentence(item, is_cost_db=True):
+    if is_cost_db:
+        fields = ["csiSection", "csiDivisionName", "csiTitle", "nahbCodeDescription", "name", "nahbCategory", "nahbFamily", "nahbType", "description"]
+    else:
+        fields = ["Family", "Type", "Height", "Width"]
+    
+    sentence = " ".join(str(item.get(field, "")) for field in fields if field in item)
+    logger.info(f"Created sentence: {sentence[:100]}...")  # Log first 100 characters
+    return sentence
+
 def create_faiss_index(embeddings):
     if not embeddings or len(embeddings) == 0:
         logger.error("No embeddings provided to create FAISS index")
@@ -56,29 +66,6 @@ def create_faiss_index(embeddings):
         logger.error(f"Error creating FAISS index: {str(e)}")
         logger.error(traceback.format_exc())
         return None
-
-def find_best_match(query_embedding):
-    if query_embedding is None or st.session_state.cost_index is None:
-        logger.error("Invalid query embedding or index for finding best match")
-        return None, None
-    try:
-        distances, indices = st.session_state.cost_index.search(np.array([query_embedding]), 1)
-        best_match_index = indices[0][0]
-        return st.session_state.cost_database[best_match_index], distances[0][0]
-    except Exception as e:
-        logger.error(f"Error finding best match: {str(e)}")
-        logger.error(traceback.format_exc())
-        return None, None
-
-def create_sentence(item, is_cost_db=True):
-    if is_cost_db:
-        fields = ["csiSection", "csiDivisionName", "csiTitle", "nahbCodeDescription", "name", "nahbCategory", "nahbFamily", "nahbType", "description"]
-    else:
-        fields = ["Family", "Type", "Height", "Width"]
-    
-    sentence = " ".join(str(item.get(field, "")) for field in fields if field in item)
-    logger.info(f"Created sentence: {sentence[:100]}...")  # Log first 100 characters
-    return sentence
 
 def update_cost_embeddings_and_index():
     try:
@@ -109,28 +96,18 @@ def update_cost_embeddings_and_index():
         logger.error(traceback.format_exc())
         return None, None
 
-def update_canvas_embeddings():
+def find_best_match(query_embedding):
+    if query_embedding is None or st.session_state.cost_index is None:
+        logger.error("Invalid query embedding or index for finding best match")
+        return None, None
     try:
-        embeddings = []
-        for item in st.session_state.canvas_data:
-            sentence = create_sentence(item, is_cost_db=False)
-            embedding = get_openai_embedding(sentence)
-            if embedding is None:
-                logger.error(f"Failed to get embedding for canvas item: {item.get('Family', 'Unknown')}")
-                continue
-            embeddings.append(embedding)
-        
-        if not embeddings:
-            logger.error("No valid canvas embeddings created")
-            return None
-        
-        st.session_state.canvas_embeddings = embeddings
-        logger.info("Canvas embeddings updated successfully")
-        return embeddings
+        distances, indices = st.session_state.cost_index.search(np.array([query_embedding]), 1)
+        best_match_index = indices[0][0]
+        return st.session_state.cost_database[best_match_index], distances[0][0]
     except Exception as e:
-        logger.error(f"Error updating canvas embeddings: {str(e)}")
+        logger.error(f"Error finding best match: {str(e)}")
         logger.error(traceback.format_exc())
-        return None
+        return None, None
 
 # Page functions
 def cost_database_page():
@@ -157,13 +134,24 @@ def cost_database_page():
             with st.spinner("Updating embeddings and index..."):
                 embeddings, index = update_cost_embeddings_and_index()
             if embeddings is not None and index is not None:
-                st.success("Embeddings and index updated automatically!")
+                st.success(f"Embeddings and index updated automatically! Created {len(embeddings)} embeddings.")
             else:
                 st.error("Failed to update embeddings and index. Please check the logs for details.")
                 st.error("You may need to check your OpenAI API key or network connection.")
+        except json.JSONDecodeError:
+            st.error("Error: Invalid JSON file. Please upload a valid JSON file.")
         except Exception as e:
             st.error(f"Error uploading cost database: {str(e)}")
             st.error(traceback.format_exc())
+
+    # Display current embeddings and index info
+    if st.session_state.cost_embeddings is not None and st.session_state.cost_index is not None:
+        st.subheader("Current Embeddings and Index Information")
+        st.write(f"Number of embeddings: {len(st.session_state.cost_embeddings)}")
+        st.write(f"Embedding dimension: {len(st.session_state.cost_embeddings[0])}")
+        st.write(f"Index size: {st.session_state.cost_index.ntotal}")
+    else:
+        st.warning("No embeddings or index created yet. Please upload a cost database.")
 
 def add_new_item_page():
     st.title("Add New Item to Cost Database")
@@ -255,35 +243,32 @@ def canvas_data_page():
             st.session_state.canvas_data = canvas_data_json[0].get("Automated Door Schedule", [])
             logger.info(f"Loaded canvas data with {len(st.session_state.canvas_data)} items")
             st.success(f"Canvas data loaded with {len(st.session_state.canvas_data)} items")
-            
-            # Update canvas embeddings
-            with st.spinner("Updating canvas embeddings..."):
-                canvas_embeddings = update_canvas_embeddings()
-            if canvas_embeddings is not None:
-                st.success("Canvas embeddings updated successfully!")
-            else:
-                st.error("Failed to update canvas embeddings. Please check the logs for details.")
         except Exception as e:
             st.error(f"Error loading canvas data: {str(e)}")
             st.error(traceback.format_exc())
             return
 
-    if st.session_state.canvas_data and st.session_state.canvas_embeddings:
+    if st.session_state.canvas_data:
         if st.button("Process Canvas Data"):
             results = []
-            for item, embedding in zip(st.session_state.canvas_data, st.session_state.canvas_embeddings):
-                best_match, distance = find_best_match(embedding)
-                if best_match is not None:
-                    results.append({
-                        "Canvas Item": item.get('Family', '') + ' - ' + item.get('Type', ''),
-                        "Matched Item": best_match.get('name', ''),
-                        "Matched Description": best_match.get('description', ''),
-                        "Matched Material Rate (USD)": best_match.get('materialRateUsd', ''),
-                        "Matched Burdened Labor Rate (USD)": best_match.get('burdenedLaborRateUsd', ''),
-                        "Similarity Score": 1 / (1 + distance)
-                    })
+            for item in st.session_state.canvas_data:
+                sentence = create_sentence(item, is_cost_db=False)
+                query_embedding = get_openai_embedding(sentence)
+                if query_embedding is not None:
+                    best_match, distance = find_best_match(query_embedding)
+                    if best_match is not None:
+                        results.append({
+                            "Canvas Item": item.get('Family', '') + ' - ' + item.get('Type', ''),
+                            "Matched Item": best_match.get('name', ''),
+                            "Matched Description": best_match.get('description', ''),
+                            "Matched Material Rate (USD)": best_match.get('materialRateUsd', ''),
+                            "Matched Burdened Labor Rate (USD)": best_match.get('burdenedLaborRateUsd', ''),
+                            "Similarity Score": 1 / (1 + distance)
+                        })
+                    else:
+                        st.warning(f"No match found for item: {item.get('Family', '')} - {item.get('Type', '')}")
                 else:
-                    st.warning(f"No match found for item: {item.get('Family', '')} - {item.get('Type', '')}")
+                    st.warning(f"Failed to get embedding for item: {item.get('Family', '')} - {item.get('Type', '')}")
 
             if results:
                 st.session_state.canvas_data_results = results
