@@ -64,16 +64,30 @@ def get_openai_embedding(text):
         return None
 
 def create_faiss_index(embeddings):
-    dimension = len(embeddings[0])
-    index = faiss.IndexFlatL2(dimension)
-    index.add(np.array(embeddings))
-    logger.info(f"FAISS index created with {len(embeddings)} items")
-    return index
+    if not embeddings or len(embeddings) == 0:
+        logger.error("No embeddings provided to create FAISS index")
+        return None
+    try:
+        dimension = len(embeddings[0])
+        index = faiss.IndexFlatL2(dimension)
+        index.add(np.array(embeddings))
+        logger.info(f"FAISS index created with {len(embeddings)} items")
+        return index
+    except Exception as e:
+        logger.error(f"Error creating FAISS index: {str(e)}")
+        return None
 
 def find_best_match(query_embedding, index, cost_database):
-    distances, indices = index.search(np.array([query_embedding]), 1)
-    best_match_index = indices[0][0]
-    return cost_database[best_match_index], distances[0][0]
+    if query_embedding is None or index is None:
+        logger.error("Invalid query embedding or index for finding best match")
+        return None, None
+    try:
+        distances, indices = index.search(np.array([query_embedding]), 1)
+        best_match_index = indices[0][0]
+        return cost_database[best_match_index], distances[0][0]
+    except Exception as e:
+        logger.error(f"Error finding best match: {str(e)}")
+        return None, None
 
 def create_sentence(item, is_cost_db=True):
     if is_cost_db:
@@ -84,6 +98,24 @@ def create_sentence(item, is_cost_db=True):
     sentence = " ".join(str(item.get(field, "")) for field in fields if field in item)
     logger.info(f"Created sentence: {sentence[:100]}...")  # Log first 100 characters
     return sentence
+
+def update_embeddings_and_index(cost_database):
+    try:
+        embeddings = [get_openai_embedding(create_sentence(item)) for item in cost_database]
+        if not embeddings or len(embeddings) == 0:
+            logger.error("No valid embeddings created")
+            return None, None
+        index = create_faiss_index(embeddings)
+        if index is not None:
+            save_embeddings_and_index(embeddings, index)
+            logger.info("Embeddings and index updated successfully")
+            return embeddings, index
+        else:
+            logger.error("Failed to create FAISS index")
+            return None, None
+    except Exception as e:
+        logger.error(f"Error updating embeddings and index: {str(e)}")
+        return None, None
 
 # Page functions
 def cost_database_page():
@@ -100,19 +132,22 @@ def cost_database_page():
 
     uploaded_file = st.file_uploader("Upload Cost Database (JSON)", type="json")
     if uploaded_file is not None:
-        cost_database = json.load(uploaded_file)
-        for item in cost_database:
-            if 'id' not in item:
-                item['id'] = str(uuid.uuid4())
-        save_cost_database(cost_database)
-        st.success("Cost database uploaded successfully!")
-
-    if st.button("Update Embeddings"):
-        with st.spinner("Updating embeddings..."):
-            embeddings = [get_openai_embedding(create_sentence(item)) for item in cost_database]
-            index = create_faiss_index(embeddings)
-            save_embeddings_and_index(embeddings, index)
-        st.success("Embeddings updated successfully!")
+        try:
+            new_cost_database = json.load(uploaded_file)
+            for item in new_cost_database:
+                if 'id' not in item:
+                    item['id'] = str(uuid.uuid4())
+            save_cost_database(new_cost_database)
+            st.success("Cost database uploaded successfully!")
+            
+            # Automatically update embeddings and index
+            embeddings, index = update_embeddings_and_index(new_cost_database)
+            if embeddings is not None and index is not None:
+                st.success("Embeddings and index updated automatically!")
+            else:
+                st.error("Failed to update embeddings and index. Please check the logs.")
+        except Exception as e:
+            st.error(f"Error uploading cost database: {str(e)}")
 
 def add_new_item_page():
     st.title("Add New Item to Cost Database")
@@ -138,16 +173,12 @@ def add_new_item_page():
         save_cost_database(cost_database)
         st.success("Item added successfully!")
         
-        # Update embeddings
-        embeddings, index = load_embeddings_and_index()
-        new_embedding = get_openai_embedding(create_sentence(new_item))
+        # Automatically update embeddings and index
+        embeddings, index = update_embeddings_and_index(cost_database)
         if embeddings is not None and index is not None:
-            embeddings = np.vstack((embeddings, new_embedding))
-            index.add(np.array([new_embedding]))
-            save_embeddings_and_index(embeddings, index)
-            st.success("Embeddings updated successfully!")
+            st.success("Embeddings and index updated automatically!")
         else:
-            st.warning("Embeddings not found. Please update embeddings from the Cost Database page.")
+            st.error("Failed to update embeddings and index. Please check the logs.")
 
 def edit_delete_page():
     st.title("Edit/Delete Items")
@@ -171,11 +202,26 @@ def edit_delete_page():
                     cost_database[index] = edit_item
                     save_cost_database(cost_database)
                     st.success("Item updated successfully!")
+                    
+                    # Automatically update embeddings and index
+                    embeddings, index = update_embeddings_and_index(cost_database)
+                    if embeddings is not None and index is not None:
+                        st.success("Embeddings and index updated automatically!")
+                    else:
+                        st.error("Failed to update embeddings and index. Please check the logs.")
+            
             with col2:
                 if st.button("Delete Item"):
                     cost_database.remove(item_to_edit)
                     save_cost_database(cost_database)
                     st.success("Item deleted successfully!")
+                    
+                    # Automatically update embeddings and index
+                    embeddings, index = update_embeddings_and_index(cost_database)
+                    if embeddings is not None and index is not None:
+                        st.success("Embeddings and index updated automatically!")
+                    else:
+                        st.error("Failed to update embeddings and index. Please check the logs.")
         else:
             st.error("Item not found.")
 
@@ -205,9 +251,13 @@ def canvas_data_page():
 
     if uploaded_file is not None or process_button:
         if uploaded_file:
-            canvas_data_json = json.load(uploaded_file)
-            canvas_data = canvas_data_json[0].get("Automated Door Schedule", [])
-            logger.info(f"Loaded canvas data with {len(canvas_data)} items")
+            try:
+                canvas_data_json = json.load(uploaded_file)
+                canvas_data = canvas_data_json[0].get("Automated Door Schedule", [])
+                logger.info(f"Loaded canvas data with {len(canvas_data)} items")
+            except Exception as e:
+                st.error(f"Error loading canvas data: {str(e)}")
+                return
         else:
             canvas_data = [manual_input]
             logger.info("Processing manual input")
@@ -217,26 +267,32 @@ def canvas_data_page():
             sentence = create_sentence(item, is_cost_db=False)
             query_embedding = get_openai_embedding(sentence)
             best_match, distance = find_best_match(query_embedding, index, cost_database)
-            results.append({
-                "Canvas Item": item.get('Family', '') + ' - ' + item.get('Type', ''),
-                "Matched Item": best_match.get('name', ''),
-                "Matched Description": best_match.get('description', ''),
-                "Matched Material Rate (USD)": best_match.get('materialRateUsd', ''),
-                "Matched Burdened Labor Rate (USD)": best_match.get('burdenedLaborRateUsd', ''),
-                "Similarity Score": 1 / (1 + distance)
-            })
+            if best_match is not None:
+                results.append({
+                    "Canvas Item": item.get('Family', '') + ' - ' + item.get('Type', ''),
+                    "Matched Item": best_match.get('name', ''),
+                    "Matched Description": best_match.get('description', ''),
+                    "Matched Material Rate (USD)": best_match.get('materialRateUsd', ''),
+                    "Matched Burdened Labor Rate (USD)": best_match.get('burdenedLaborRateUsd', ''),
+                    "Similarity Score": 1 / (1 + distance)
+                })
+            else:
+                st.warning(f"No match found for item: {item.get('Family', '')} - {item.get('Type', '')}")
 
-        st.subheader("Matching Results")
-        results_df = pd.DataFrame(results)
-        st.dataframe(results_df)
+        if results:
+            st.subheader("Matching Results")
+            results_df = pd.DataFrame(results)
+            st.dataframe(results_df)
 
-        csv = results_df.to_csv(index=False)
-        st.download_button(
-            label="Download Results CSV",
-            data=csv,
-            file_name="canvas_matching_results.csv",
-            mime="text/csv",
-        )
+            csv = results_df.to_csv(index=False)
+            st.download_button(
+                label="Download Results CSV",
+                data=csv,
+                file_name="canvas_matching_results.csv",
+                mime="text/csv",
+            )
+        else:
+            st.warning("No matching results found.")
 
 def main():
     st.sidebar.title("RAG Demo App")
