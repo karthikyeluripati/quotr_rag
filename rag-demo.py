@@ -8,6 +8,7 @@ import os
 import pickle
 import uuid
 import logging
+import traceback
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -61,6 +62,7 @@ def get_openai_embedding(text):
         return response['data'][0]['embedding']
     except Exception as e:
         logger.error(f"Error getting embedding: {str(e)}")
+        logger.error(traceback.format_exc())
         return None
 
 def create_faiss_index(embeddings):
@@ -75,6 +77,7 @@ def create_faiss_index(embeddings):
         return index
     except Exception as e:
         logger.error(f"Error creating FAISS index: {str(e)}")
+        logger.error(traceback.format_exc())
         return None
 
 def find_best_match(query_embedding, index, cost_database):
@@ -87,6 +90,7 @@ def find_best_match(query_embedding, index, cost_database):
         return cost_database[best_match_index], distances[0][0]
     except Exception as e:
         logger.error(f"Error finding best match: {str(e)}")
+        logger.error(traceback.format_exc())
         return None, None
 
 def create_sentence(item, is_cost_db=True):
@@ -101,10 +105,19 @@ def create_sentence(item, is_cost_db=True):
 
 def update_embeddings_and_index(cost_database):
     try:
-        embeddings = [get_openai_embedding(create_sentence(item)) for item in cost_database]
-        if not embeddings or len(embeddings) == 0:
+        embeddings = []
+        for item in cost_database:
+            sentence = create_sentence(item)
+            embedding = get_openai_embedding(sentence)
+            if embedding is None:
+                logger.error(f"Failed to get embedding for item: {item.get('name', 'Unknown')}")
+                continue
+            embeddings.append(embedding)
+        
+        if not embeddings:
             logger.error("No valid embeddings created")
             return None, None
+        
         index = create_faiss_index(embeddings)
         if index is not None:
             save_embeddings_and_index(embeddings, index)
@@ -115,6 +128,7 @@ def update_embeddings_and_index(cost_database):
             return None, None
     except Exception as e:
         logger.error(f"Error updating embeddings and index: {str(e)}")
+        logger.error(traceback.format_exc())
         return None, None
 
 # Page functions
@@ -141,13 +155,16 @@ def cost_database_page():
             st.success("Cost database uploaded successfully!")
             
             # Automatically update embeddings and index
-            embeddings, index = update_embeddings_and_index(new_cost_database)
+            with st.spinner("Updating embeddings and index..."):
+                embeddings, index = update_embeddings_and_index(new_cost_database)
             if embeddings is not None and index is not None:
                 st.success("Embeddings and index updated automatically!")
             else:
-                st.error("Failed to update embeddings and index. Please check the logs.")
+                st.error("Failed to update embeddings and index. Please check the logs for details.")
+                st.error("You may need to check your OpenAI API key or network connection.")
         except Exception as e:
             st.error(f"Error uploading cost database: {str(e)}")
+            st.error(traceback.format_exc())
 
 def add_new_item_page():
     st.title("Add New Item to Cost Database")
@@ -174,11 +191,13 @@ def add_new_item_page():
         st.success("Item added successfully!")
         
         # Automatically update embeddings and index
-        embeddings, index = update_embeddings_and_index(cost_database)
+        with st.spinner("Updating embeddings and index..."):
+            embeddings, index = update_embeddings_and_index(cost_database)
         if embeddings is not None and index is not None:
             st.success("Embeddings and index updated automatically!")
         else:
-            st.error("Failed to update embeddings and index. Please check the logs.")
+            st.error("Failed to update embeddings and index. Please check the logs for details.")
+            st.error("You may need to check your OpenAI API key or network connection.")
 
 def edit_delete_page():
     st.title("Edit/Delete Items")
@@ -204,11 +223,13 @@ def edit_delete_page():
                     st.success("Item updated successfully!")
                     
                     # Automatically update embeddings and index
-                    embeddings, index = update_embeddings_and_index(cost_database)
+                    with st.spinner("Updating embeddings and index..."):
+                        embeddings, index = update_embeddings_and_index(cost_database)
                     if embeddings is not None and index is not None:
                         st.success("Embeddings and index updated automatically!")
                     else:
-                        st.error("Failed to update embeddings and index. Please check the logs.")
+                        st.error("Failed to update embeddings and index. Please check the logs for details.")
+                        st.error("You may need to check your OpenAI API key or network connection.")
             
             with col2:
                 if st.button("Delete Item"):
@@ -217,11 +238,13 @@ def edit_delete_page():
                     st.success("Item deleted successfully!")
                     
                     # Automatically update embeddings and index
-                    embeddings, index = update_embeddings_and_index(cost_database)
+                    with st.spinner("Updating embeddings and index..."):
+                        embeddings, index = update_embeddings_and_index(cost_database)
                     if embeddings is not None and index is not None:
                         st.success("Embeddings and index updated automatically!")
                     else:
-                        st.error("Failed to update embeddings and index. Please check the logs.")
+                        st.error("Failed to update embeddings and index. Please check the logs for details.")
+                        st.error("You may need to check your OpenAI API key or network connection.")
         else:
             st.error("Item not found.")
 
@@ -257,6 +280,7 @@ def canvas_data_page():
                 logger.info(f"Loaded canvas data with {len(canvas_data)} items")
             except Exception as e:
                 st.error(f"Error loading canvas data: {str(e)}")
+                st.error(traceback.format_exc())
                 return
         else:
             canvas_data = [manual_input]
@@ -266,18 +290,21 @@ def canvas_data_page():
         for item in canvas_data:
             sentence = create_sentence(item, is_cost_db=False)
             query_embedding = get_openai_embedding(sentence)
-            best_match, distance = find_best_match(query_embedding, index, cost_database)
-            if best_match is not None:
-                results.append({
-                    "Canvas Item": item.get('Family', '') + ' - ' + item.get('Type', ''),
-                    "Matched Item": best_match.get('name', ''),
-                    "Matched Description": best_match.get('description', ''),
-                    "Matched Material Rate (USD)": best_match.get('materialRateUsd', ''),
-                    "Matched Burdened Labor Rate (USD)": best_match.get('burdenedLaborRateUsd', ''),
-                    "Similarity Score": 1 / (1 + distance)
-                })
+            if query_embedding is not None:
+                best_match, distance = find_best_match(query_embedding, index, cost_database)
+                if best_match is not None:
+                    results.append({
+                        "Canvas Item": item.get('Family', '') + ' - ' + item.get('Type', ''),
+                        "Matched Item": best_match.get('name', ''),
+                        "Matched Description": best_match.get('description', ''),
+                        "Matched Material Rate (USD)": best_match.get('materialRateUsd', ''),
+                        "Matched Burdened Labor Rate (USD)": best_match.get('burdenedLaborRateUsd', ''),
+                        "Similarity Score": 1 / (1 + distance)
+                    })
+                else:
+                    st.warning(f"No match found for item: {item.get('Family', '')} - {item.get('Type', '')}")
             else:
-                st.warning(f"No match found for item: {item.get('Family', '')} - {item.get('Type', '')}")
+                st.warning(f"Failed to get embedding for item: {item.get('Family', '')} - {item.get('Type', '')}")
 
         if results:
             st.subheader("Matching Results")
