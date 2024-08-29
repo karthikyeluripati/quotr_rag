@@ -3,3 +3,4 @@ pandas
 faiss-cpu
 numpy
 openai
+uuid
