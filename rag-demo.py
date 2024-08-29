@@ -6,17 +6,15 @@ import numpy as np
 import pandas as pd
 import uuid
 import logging
+import io
 import traceback
-import sys
 
 # Set up logging
+log_stream = io.StringIO()
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('rag_demo_app.log', mode='a')
-    ]
+    stream=log_stream
 )
 logger = logging.getLogger(__name__)
 
@@ -32,9 +30,7 @@ if 'cost_embeddings' not in st.session_state:
 if 'cost_index' not in st.session_state:
     st.session_state.cost_index = None
 if 'canvas_data' not in st.session_state:
-    st.session_state.canvas_data = None
-if 'canvas_embeddings' not in st.session_state:
-    st.session_state.canvas_embeddings = None
+    st.session_state.canvas_data = []
 if 'canvas_data_results' not in st.session_state:
     st.session_state.canvas_data_results = []
 
@@ -43,7 +39,7 @@ def get_openai_embedding(text):
     try:
         response = openai.Embedding.create(
             input=text,
-            model="text-embedding-3-small"
+            model="text-embedding-ada-002"
         )
         return response['data'][0]['embedding']
     except openai.error.AuthenticationError:
@@ -77,7 +73,7 @@ def create_faiss_index(embeddings):
     try:
         dimension = len(embeddings[0])
         index = faiss.IndexFlatL2(dimension)
-        index.add(np.array(embeddings))
+        index.add(np.array(embeddings).astype('float32'))
         logger.info(f"FAISS index created with {len(embeddings)} items")
         return index
     except Exception as e:
@@ -123,7 +119,7 @@ def find_best_match(query_embedding):
         logger.error("Invalid query embedding or index for finding best match")
         return None, None
     try:
-        distances, indices = st.session_state.cost_index.search(np.array([query_embedding]), 1)
+        distances, indices = st.session_state.cost_index.search(np.array([query_embedding]).astype('float32'), 1)
         best_match_index = indices[0][0]
         return st.session_state.cost_database[best_match_index], distances[0][0]
     except Exception as e:
@@ -153,22 +149,20 @@ def cost_database_page():
             logger.info(f"Cost database uploaded successfully with {len(new_cost_database)} items")
             st.success(f"Cost database uploaded successfully! {len(new_cost_database)} items loaded.")
             
-            # Check OpenAI API key
-            if not openai.api_key:
-                logger.error("OpenAI API key is not set")
-                st.error("OpenAI API key is not set. Please check your Streamlit secrets.")
-                return
-
             # Automatically update embeddings and index
             with st.spinner("Updating embeddings and index..."):
                 embeddings, index = update_cost_embeddings_and_index()
             if embeddings is not None and index is not None:
                 logger.info(f"Embeddings and index updated successfully with {len(embeddings)} embeddings")
                 st.success(f"Embeddings and index updated automatically! Created {len(embeddings)} embeddings.")
+                
+                # Display updated cost database
+                st.subheader("Updated Cost Database")
+                df = pd.DataFrame(st.session_state.cost_database)
+                st.dataframe(df)
             else:
                 logger.error("Failed to update embeddings and index")
                 st.error("Failed to update embeddings and index. Please check the logs for details.")
-                st.error("You may need to check your OpenAI API key or network connection.")
         except json.JSONDecodeError:
             logger.error("Invalid JSON file uploaded")
             st.error("Error: Invalid JSON file. Please upload a valid JSON file.")
@@ -177,100 +171,6 @@ def cost_database_page():
             logger.error(traceback.format_exc())
             st.error(f"Error uploading cost database: {str(e)}")
             st.error(traceback.format_exc())
-
-    # Display current embeddings and index info
-    if st.session_state.cost_embeddings is not None and st.session_state.cost_index is not None:
-        st.subheader("Current Embeddings and Index Information")
-        st.write(f"Number of embeddings: {len(st.session_state.cost_embeddings)}")
-        st.write(f"Embedding dimension: {len(st.session_state.cost_embeddings[0])}")
-        st.write(f"Index size: {st.session_state.cost_index.ntotal}")
-    else:
-        st.warning("No embeddings or index created yet. Please upload a cost database.")
-
-def add_new_item_page():
-    st.title("Add New Item to Cost Database")
-
-    new_item = {}
-    new_item['id'] = str(uuid.uuid4())
-    new_item['name'] = st.text_input("Item Name")
-    new_item['csiSection'] = st.text_input("CSI Section")
-    new_item['csiDivisionName'] = st.text_input("CSI Division Name")
-    new_item['csiTitle'] = st.text_input("CSI Title")
-    new_item['nahbCodeDescription'] = st.text_input("NAHB Code Description")
-    new_item['nahbCategory'] = st.text_input("NAHB Category")
-    new_item['nahbFamily'] = st.text_input("NAHB Family")
-    new_item['nahbType'] = st.text_input("NAHB Type")
-    new_item['description'] = st.text_area("Description")
-    new_item['materialRateUsd'] = st.number_input("Material Rate (USD)", min_value=0.0, format="%.2f")
-    new_item['burdenedLaborRateUsd'] = st.number_input("Burdened Labor Rate (USD)", min_value=0.0, format="%.2f")
-
-    if st.button("Add Item"):
-        st.session_state.cost_database.append(new_item)
-        logger.info(f"New item added to cost database: {new_item['name']}")
-        st.success("Item added successfully!")
-        
-        # Automatically update embeddings and index
-        with st.spinner("Updating embeddings and index..."):
-            embeddings, index = update_cost_embeddings_and_index()
-        if embeddings is not None and index is not None:
-            logger.info("Embeddings and index updated successfully after adding new item")
-            st.success("Embeddings and index updated automatically!")
-        else:
-            logger.error("Failed to update embeddings and index after adding new item")
-            st.error("Failed to update embeddings and index. Please check the logs for details.")
-            st.error("You may need to check your OpenAI API key or network connection.")
-
-def edit_delete_page():
-    st.title("Edit/Delete Items")
-
-    search_term = st.text_input("Enter item ID or name to edit/delete")
-    if search_term:
-        item_to_edit = next((item for item in st.session_state.cost_database if item['id'] == search_term or item['name'] == search_term), None)
-        if item_to_edit:
-            st.write(f"Editing item: {item_to_edit['name']} (ID: {item_to_edit['id']})")
-            edit_item = item_to_edit.copy()
-            for key in edit_item:
-                if key != 'id':
-                    edit_item[key] = st.text_input(f"Edit {key}", edit_item[key])
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("Update Item"):
-                    index = st.session_state.cost_database.index(item_to_edit)
-                    st.session_state.cost_database[index] = edit_item
-                    logger.info(f"Item updated: {edit_item['name']}")
-                    st.success("Item updated successfully!")
-                    
-                    # Automatically update embeddings and index
-                    with st.spinner("Updating embeddings and index..."):
-                        embeddings, index = update_cost_embeddings_and_index()
-                    if embeddings is not None and index is not None:
-                        logger.info("Embeddings and index updated successfully after editing item")
-                        st.success("Embeddings and index updated automatically!")
-                    else:
-                        logger.error("Failed to update embeddings and index after editing item")
-                        st.error("Failed to update embeddings and index. Please check the logs for details.")
-                        st.error("You may need to check your OpenAI API key or network connection.")
-            
-            with col2:
-                if st.button("Delete Item"):
-                    st.session_state.cost_database.remove(item_to_edit)
-                    logger.info(f"Item deleted: {item_to_edit['name']}")
-                    st.success("Item deleted successfully!")
-                    
-                    # Automatically update embeddings and index
-                    with st.spinner("Updating embeddings and index..."):
-                        embeddings, index = update_cost_embeddings_and_index()
-                    if embeddings is not None and index is not None:
-                        logger.info("Embeddings and index updated successfully after deleting item")
-                        st.success("Embeddings and index updated automatically!")
-                    else:
-                        logger.error("Failed to update embeddings and index after deleting item")
-                        st.error("Failed to update embeddings and index. Please check the logs for details.")
-                        st.error("You may need to check your OpenAI API key or network connection.")
-        else:
-            logger.warning(f"Item not found: {search_term}")
-            st.error("Item not found.")
 
 def canvas_data_page():
     st.title("Canvas Data Processing")
@@ -340,49 +240,6 @@ def canvas_data_page():
     else:
         st.info("Please upload canvas data to process.")
 
-    # Edit/Delete Canvas Data Results
-    if st.session_state.canvas_data_results:
-        st.subheader("Edit or Delete Canvas Data Results")
-        index_to_edit = st.number_input("Enter the index of the entry to edit/delete", min_value=0, max_value=len(st.session_state.canvas_data_results)-1, value=0)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Edit Entry"):
-                if 0 <= index_to_edit < len(st.session_state.canvas_data_results):
-                    entry = st.session_state.canvas_data_results[index_to_edit]
-                    edited_entry = {}
-                    for key, value in entry.items():
-                        edited_entry[key] = st.text_input(f"Edit {key}", value)
-                    
-                    if st.button("Save Changes"):
-                        st.session_state.canvas_data_results[index_to_edit] = edited_entry
-                        logger.info(f"Canvas data result edited at index {index_to_edit}")
-                        st.success("Entry updated successfully!")
-                else:
-                    logger.error(f"Invalid index for editing: {index_to_edit}")
-                    st.error("Invalid index.")
-
-        with col2:
-            if st.button("Delete Entry"):
-                if 0 <= index_to_edit < len(st.session_state.canvas_data_results):
-                    del st.session_state.canvas_data_results[index_to_edit]
-                    logger.info(f"Canvas data result deleted at index {index_to_edit}")
-                    st.success("Entry deleted successfully!")
-                else:
-                    logger.error(f"Invalid index for deletion: {index_to_edit}")
-                    st.error("Invalid index.")
-
-        if st.button("Download Updated Canvas Data Results"):
-            df = pd.DataFrame(st.session_state.canvas_data_results)
-            csv = df.to_csv(index=False)
-            st.download_button(
-                label="Download Updated CSV",
-                data=csv,
-                file_name="updated_canvas_data_results.csv",
-                mime="text/csv",
-            )
-            logger.info("Updated canvas data results downloaded")
-
 def manual_best_match_page():
     st.title("Manual Best Match Check")
 
@@ -420,12 +277,10 @@ def manual_best_match_page():
                 st.json(match_result)
                 logger.info(f"Best match found for manual input: {best_match.get('name', '')}")
                 
-                if st.button("Add to Canvas Data Results"):
-                    if 'canvas_data_results' not in st.session_state:
-                        st.session_state.canvas_data_results = []
-                    st.session_state.canvas_data_results.append(match_result)
-                    logger.info("Manual match added to Canvas Data Results")
-                    st.success("Added to Canvas Data Results successfully!")
+                if st.button("Add to Canvas Data"):
+                    st.session_state.canvas_data.append(manual_input)
+                    logger.info("Manual input added to Canvas Data")
+                    st.success("Added to Canvas Data successfully!")
             else:
                 logger.warning("No match found for the manually entered item")
                 st.warning("No match found for the entered item.")
@@ -433,26 +288,39 @@ def manual_best_match_page():
             logger.error("Failed to get embedding for the manually entered item")
             st.warning("Failed to get embedding for the entered item.")
 
+def display_logs():
+    st.sidebar.subheader("Logs")
+    log_contents = log_stream.getvalue()
+    if log_contents:
+        st.sidebar.text_area("Log Output", log_contents, height=300)
+    else:
+        st.sidebar.text("No logs available.")
+
 def main():
     st.sidebar.title("RAG Demo App")
     page = st.sidebar.radio("Select a page", [
         "Cost Database", 
-        "Add New Item", 
-        "Edit/Delete Items", 
         "Canvas Data Processing",
         "Manual Best Match Check"
     ])
 
     if page == "Cost Database":
         cost_database_page()
-    elif page == "Add New Item":
-        add_new_item_page()
-    elif page == "Edit/Delete Items":
-        edit_delete_page()
     elif page == "Canvas Data Processing":
         canvas_data_page()
     elif page == "Manual Best Match Check":
         manual_best_match_page()
+
+    # Debug information
+    st.sidebar.subheader("Debug Information")
+    st.sidebar.write(f"Cost Database Items: {len(st.session_state.cost_database)}")
+    st.sidebar.write(f"Cost Embeddings: {'Created' if st.session_state.cost_embeddings is not None else 'Not Created'}")
+    st.sidebar.write(f"Cost Index: {'Created' if st.session_state.cost_index is not None else 'Not Created'}")
+    st.sidebar.write(f"Canvas Data Items: {len(st.session_state.canvas_data)}")
+    st.sidebar.write(f"Canvas Data Results: {len(st.session_state.canvas_data_results)}")
+
+    # Display logs
+    display_logs()
 
 if __name__ == "__main__":
     main()
