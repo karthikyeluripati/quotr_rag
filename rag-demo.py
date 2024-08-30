@@ -190,8 +190,12 @@ def edit_delete_page():
                     cost_database.remove(item_to_edit)
                     save_cost_database(cost_database)
                     # Delete from Pinecone index
-                    index.delete(ids=[item_to_edit['id']])
-                    st.success("Item deleted successfully!")
+                    try:
+                        st.success("Item deleted successfully!")
+                        index.delete(ids=[item_to_edit['id']])
+                    except Exception as e:
+                        st.error(f"Error deleting item from Pinecone index: {str(e)}")
+                        st.warning("Item was removed from local database but may still exist in Pinecone index.")
         else:
             st.error("Item not found.")
 
@@ -219,33 +223,16 @@ def canvas_data_page():
     process_button = st.button("Process Data")
 
     if uploaded_file is not None or process_button:
+        results = []
         if uploaded_file:
             canvas_data_json = json.load(uploaded_file)
-            canvas_data = canvas_data_json[0].get("Automated Door Schedule", [])
-            logger.info(f"Loaded canvas data with {len(canvas_data)} items")
+            for schedule_name, canvas_data in canvas_data_json.items():
+                logger.info(f"Processing {schedule_name} with {len(canvas_data)} items")
+                results.extend(process_canvas_data(canvas_data, cost_database, schedule_name))
         else:
             canvas_data = [manual_input]
             logger.info("Processing manual input")
-
-        results = []
-        for item in canvas_data:
-            sentence = create_sentence(item, is_cost_db=False)
-            query_embedding = get_openai_embedding(sentence)
-            if query_embedding:
-                best_match, distance = find_best_match(query_embedding, cost_database)
-                if best_match:
-                    results.append({
-                        "Canvas Item": item.get('Family', '') + ' - ' + item.get('Type', ''),
-                        "Matched Item": best_match.get('name', ''),
-                        "Matched Description": best_match.get('description', ''),
-                        "Matched Material Rate (USD)": best_match.get('materialRateUsd', ''),
-                        "Matched Burdened Labor Rate (USD)": best_match.get('burdenedLaborRateUsd', ''),
-                        "Similarity Score": 1 / (1 + distance)
-                    })
-                else:
-                    st.warning(f"No match found for item: {item.get('Family', '')} - {item.get('Type', '')}")
-            else:
-                st.warning(f"Failed to generate embedding for item: {item.get('Family', '')} - {item.get('Type', '')}")
+            results = process_canvas_data(canvas_data, cost_database, "Manual Input")
 
         if results:
             st.subheader("Matching Results")
@@ -262,6 +249,28 @@ def canvas_data_page():
         else:
             st.error("No matching results found. Please check your input data and try again.")
 
+def process_canvas_data(canvas_data, cost_database, schedule_name):
+    results = []
+    for item in canvas_data:
+        sentence = create_sentence(item, is_cost_db=False)
+        query_embedding = get_openai_embedding(sentence)
+        if query_embedding:
+            best_match, distance = find_best_match(query_embedding, cost_database)
+            if best_match:
+                results.append({
+                    "Schedule": schedule_name,
+                    "Canvas Item": item.get('Family', '') + ' - ' + item.get('Type', ''),
+                    "Matched Item": best_match.get('name', ''),
+                    "Matched Description": best_match.get('description', ''),
+                    "Matched Material Rate (USD)": best_match.get('materialRateUsd', ''),
+                    "Matched Burdened Labor Rate (USD)": best_match.get('burdenedLaborRateUsd', ''),
+                    "Similarity Score": 1 / (1 + distance)
+                })
+            else:
+                st.warning(f"No match found for item: {item.get('Family', '')} - {item.get('Type', '')} in {schedule_name}")
+        else:
+            st.warning(f"Failed to generate embedding for item: {item.get('Family', '')} - {item.get('Type', '')} in {schedule_name}")
+    return results
 def main():
     st.sidebar.title("RAG Demo App")
     page = st.sidebar.radio("Select a page", ["Cost Database", "Add New Item", "Edit/Delete Items", "Canvas Data Processing"])
