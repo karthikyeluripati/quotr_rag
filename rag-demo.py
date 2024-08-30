@@ -14,19 +14,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Set your OpenAI API key
-openai.api_key = "your-openai-api-key"  # Replace with your actual API key
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-# Initialize session state
-if 'cost_database' not in st.session_state:
-    st.session_state.cost_database = []
-if 'embeddings' not in st.session_state:
-    st.session_state.embeddings = None
-if 'index' not in st.session_state:
-    st.session_state.index = None
-if 'canvas_data_results' not in st.session_state:
-    st.session_state.canvas_data_results = []
-if 'canvas_data' not in st.session_state:
-    st.session_state.canvas_data = None
+# File paths for storing data
+COST_DB_FILE = "cost_database.json"
+EMBEDDINGS_FILE = "embeddings.pkl"
+INDEX_FILE = "faiss_index.pkl"
 
 # Helper functions
 def save_cost_database(data):
@@ -63,7 +56,7 @@ def get_openai_embedding(text):
     try:
         response = openai.Embedding.create(
             input=text,
-            model="text-embedding-3-small"
+            model="text-embedding-ada-002"
         )
         return response['data'][0]['embedding']
     except Exception as e:
@@ -78,17 +71,9 @@ def create_faiss_index(embeddings):
     return index
 
 def find_best_match(query_embedding, index, cost_database):
-    if query_embedding is None or index is None:
-        logger.error("Invalid query embedding or index for finding best match")
-        return None, None
-    try:
-        distances, indices = index.search(np.array([query_embedding]), 1)
-        best_match_index = indices[0][0]
-        return cost_database[best_match_index], distances[0][0]
-    except Exception as e:
-        logger.error(f"Error finding best match: {str(e)}")
-        logger.error(traceback.format_exc())
-        return None, None
+    distances, indices = index.search(np.array([query_embedding]), 1)
+    best_match_index = indices[0][0]
+    return cost_database[best_match_index], distances[0][0]
 
 def create_sentence(item, is_cost_db=True):
     if is_cost_db:
@@ -106,7 +91,6 @@ def cost_database_page():
 
     cost_database = load_cost_database()
 
-    # Display current database
     st.subheader("Current Cost Database")
     if cost_database:
         df = pd.DataFrame(cost_database)
@@ -136,11 +120,22 @@ def add_new_item_page():
     cost_database = load_cost_database()
 
     new_item = {}
+    new_item['id'] = str(uuid.uuid4())
     new_item['name'] = st.text_input("Item Name")
+    new_item['csiSection'] = st.text_input("CSI Section")
+    new_item['csiDivisionName'] = st.text_input("CSI Division Name")
+    new_item['csiTitle'] = st.text_input("CSI Title")
+    new_item['nahbCodeDescription'] = st.text_input("NAHB Code Description")
+    new_item['nahbCategory'] = st.text_input("NAHB Category")
+    new_item['nahbFamily'] = st.text_input("NAHB Family")
+    new_item['nahbType'] = st.text_input("NAHB Type")
     new_item['description'] = st.text_area("Description")
-    new_item['price'] = st.number_input("Price", min_value=0.0, format="%.2f")
+    new_item['materialRateUsd'] = st.number_input("Material Rate (USD)", min_value=0.0, format="%.2f")
+    new_item['burdenedLaborRateUsd'] = st.number_input("Burdened Labor Rate (USD)", min_value=0.0, format="%.2f")
+
     if st.button("Add Item"):
-        st.session_state.cost_database.append(new_item)
+        cost_database.append(new_item)
+        save_cost_database(cost_database)
         st.success("Item added successfully!")
         
         # Update embeddings
@@ -194,7 +189,6 @@ def canvas_data_page():
         st.error("Please upload and process the cost database first.")
         return
 
-    # File upload
     uploaded_file = st.file_uploader("Upload Canvas Data (JSON)", type="json")
     
     st.subheader("Or Enter Canvas Data Manually")
@@ -236,18 +230,14 @@ def canvas_data_page():
         results_df = pd.DataFrame(results)
         st.dataframe(results_df)
 
-        # Download results
         csv = results_df.to_csv(index=False)
         st.download_button(
             label="Download Results CSV",
             data=csv,
-            file_name="canvas_data_results.csv",
+            file_name="canvas_matching_results.csv",
             mime="text/csv",
         )
-    else:
-        st.info("No canvas data results available. Please upload canvas data to process or use the Manual Input to add items.")
 
-# Update the main function to use the new combined page
 def main():
     st.sidebar.title("RAG Demo App")
     page = st.sidebar.radio("Select a page", ["Cost Database", "Add New Item", "Edit/Delete Items", "Canvas Data Processing"])
