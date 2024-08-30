@@ -2,5 +2,4 @@ streamlit
 pandas
 faiss-cpu
 numpy
-openai==0.28
-uuid
+openai
