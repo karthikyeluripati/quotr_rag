@@ -4,3 +4,4 @@ openai
 numpy
 pandas
 boto3
+pinecone-client

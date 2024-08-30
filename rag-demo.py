@@ -1,13 +1,13 @@
 import streamlit as st
 import json
-import faiss
 import openai
 import numpy as np
 import pandas as pd
 import os
-import pickle
 import uuid
 import logging
+import time
+from pinecone import Pinecone, PodSpec
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -16,10 +16,30 @@ logger = logging.getLogger(__name__)
 # Set your OpenAI API key
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
+# Pinecone initialization
+pc = Pinecone(
+    api_key=st.secrets["PINECONE_API_KEY"],
+    environment=st.secrets["PINECONE_ENVIRONMENT"]
+)
+
+# Pinecone index name
+INDEX_NAME = "cost-database-index"
+
 # File paths for storing data
 COST_DB_FILE = "cost_database.json"
-EMBEDDINGS_FILE = "embeddings.pkl"
-INDEX_FILE = "faiss_index.pkl"
+
+# Connect to the existing Pinecone index
+index = pc.Index(INDEX_NAME)
+
+# Verify that the index exists
+try:
+    index_description = pc.describe_index(INDEX_NAME)
+    st.success(f"Successfully connected to index '{INDEX_NAME}'")
+    st.info(f"Index stats: {index_description.status}")
+except Exception as e:
+    st.error(f"Error connecting to index '{INDEX_NAME}': {str(e)}")
+    st.error("Please check your Pinecone API key, environment, and index name.")
+    st.stop()
 
 # Helper functions
 def save_cost_database(data):
@@ -36,52 +56,45 @@ def load_cost_database():
     logger.warning("Cost database file not found")
     return []
 
-def save_embeddings_and_index(embeddings, index):
-    with open(EMBEDDINGS_FILE, 'wb') as f:
-        pickle.dump(embeddings, f)
-    faiss.write_index(index, INDEX_FILE)
-    logger.info(f"Embeddings and index saved with {len(embeddings)} items")
-
-def load_embeddings_and_index():
-    if os.path.exists(EMBEDDINGS_FILE) and os.path.exists(INDEX_FILE):
-        with open(EMBEDDINGS_FILE, 'rb') as f:
-            embeddings = pickle.load(f)
-        index = faiss.read_index(INDEX_FILE)
-        logger.info(f"Embeddings and index loaded with {len(embeddings)} items")
-        return embeddings, index
-    logger.warning("Embeddings or index file not found")
-    return None, None
-
 def get_openai_embedding(text):
     try:
         response = openai.Embedding.create(
             input=text,
-            model="text-embedding-ada-002"
+            model="text-embedding-3-small"
         )
         return response['data'][0]['embedding']
     except Exception as e:
         logger.error(f"Error getting embedding: {str(e)}")
         return None
 
-def create_faiss_index(embeddings):
-    dimension = len(embeddings[0])
-    index = faiss.IndexFlatL2(dimension)
-    index.add(np.array(embeddings))
-    logger.info(f"FAISS index created with {len(embeddings)} items")
-    return index
+def update_pinecone_index(cost_database):
+    to_upsert = []
+    for item in cost_database:
+        sentence = create_sentence(item)
+        embedding = get_openai_embedding(sentence)
+        if embedding:
+            to_upsert.append((item['id'], embedding, item))
+    
+    # Upsert to Pinecone
+    index.upsert(vectors=to_upsert)
+    logger.info(f"Pinecone index updated with {len(to_upsert)} items")
 
-def find_best_match(query_embedding, index, cost_database):
-    distances, indices = index.search(np.array([query_embedding]), 1)
-    best_match_index = indices[0][0]
-    return cost_database[best_match_index], distances[0][0]
+def find_best_match(query_embedding, cost_database):
+    query_response = index.query(vector=query_embedding, top_k=1, include_metadata=True)
+    if query_response.matches:
+        best_match = query_response.matches[0].metadata
+        distance = query_response.matches[0].score
+        return best_match, 1 - distance  # Convert similarity to distance
+    return None, None
 
 def create_sentence(item, is_cost_db=True):
     if is_cost_db:
         fields = ["csiSection", "csiDivisionName", "csiTitle", "nahbCodeDescription", "name", "nahbCategory", "nahbFamily", "nahbType", "description"]
+        sentence = " ".join(str(item.get(field, "")).strip() for field in fields if field in item)
     else:
-        fields = ["Family", "Type", "Height", "Width"]
+        exclude_fields = ["Assembly Code", "Level", "Room: Number", "From Room: Number"]
+        sentence = " ".join(str(value).strip() for key, value in item.items() if value and key not in exclude_fields)
     
-    sentence = " ".join(str(item.get(field, "")) for field in fields if field in item)
     logger.info(f"Created sentence: {sentence[:100]}...")  # Log first 100 characters
     return sentence
 
@@ -109,9 +122,7 @@ def cost_database_page():
 
     if st.button("Update Embeddings"):
         with st.spinner("Updating embeddings..."):
-            embeddings = [get_openai_embedding(create_sentence(item)) for item in cost_database]
-            index = create_faiss_index(embeddings)
-            save_embeddings_and_index(embeddings, index)
+            update_pinecone_index(cost_database)
         st.success("Embeddings updated successfully!")
 
 def add_new_item_page():
@@ -138,16 +149,14 @@ def add_new_item_page():
         save_cost_database(cost_database)
         st.success("Item added successfully!")
         
-        # Update embeddings
-        embeddings, index = load_embeddings_and_index()
-        new_embedding = get_openai_embedding(create_sentence(new_item))
-        if embeddings is not None and index is not None:
-            embeddings = np.vstack((embeddings, new_embedding))
-            index.add(np.array([new_embedding]))
-            save_embeddings_and_index(embeddings, index)
+        # Update Pinecone index
+        sentence = create_sentence(new_item)
+        embedding = get_openai_embedding(sentence)
+        if embedding:
+            index.upsert(vectors=[(new_item['id'], embedding, new_item)])
             st.success("Embeddings updated successfully!")
         else:
-            st.warning("Embeddings not found. Please update embeddings from the Cost Database page.")
+            st.warning("Failed to update embeddings. Please update embeddings from the Cost Database page.")
 
 def edit_delete_page():
     st.title("Edit/Delete Items")
@@ -170,11 +179,18 @@ def edit_delete_page():
                     index = cost_database.index(item_to_edit)
                     cost_database[index] = edit_item
                     save_cost_database(cost_database)
+                    # Update Pinecone index
+                    sentence = create_sentence(edit_item)
+                    embedding = get_openai_embedding(sentence)
+                    if embedding:
+                        index.upsert(vectors=[(edit_item['id'], embedding, edit_item)])
                     st.success("Item updated successfully!")
             with col2:
                 if st.button("Delete Item"):
                     cost_database.remove(item_to_edit)
                     save_cost_database(cost_database)
+                    # Delete from Pinecone index
+                    index.delete(ids=[item_to_edit['id']])
                     st.success("Item deleted successfully!")
         else:
             st.error("Item not found.")
@@ -183,9 +199,8 @@ def canvas_data_page():
     st.title("Canvas Data Processing")
 
     cost_database = load_cost_database()
-    embeddings, index = load_embeddings_and_index()
 
-    if not cost_database or embeddings is None or index is None:
+    if not cost_database:
         st.error("Please upload and process the cost database first.")
         return
 
@@ -216,27 +231,36 @@ def canvas_data_page():
         for item in canvas_data:
             sentence = create_sentence(item, is_cost_db=False)
             query_embedding = get_openai_embedding(sentence)
-            best_match, distance = find_best_match(query_embedding, index, cost_database)
-            results.append({
-                "Canvas Item": item.get('Family', '') + ' - ' + item.get('Type', ''),
-                "Matched Item": best_match.get('name', ''),
-                "Matched Description": best_match.get('description', ''),
-                "Matched Material Rate (USD)": best_match.get('materialRateUsd', ''),
-                "Matched Burdened Labor Rate (USD)": best_match.get('burdenedLaborRateUsd', ''),
-                "Similarity Score": 1 / (1 + distance)
-            })
+            if query_embedding:
+                best_match, distance = find_best_match(query_embedding, cost_database)
+                if best_match:
+                    results.append({
+                        "Canvas Item": item.get('Family', '') + ' - ' + item.get('Type', ''),
+                        "Matched Item": best_match.get('name', ''),
+                        "Matched Description": best_match.get('description', ''),
+                        "Matched Material Rate (USD)": best_match.get('materialRateUsd', ''),
+                        "Matched Burdened Labor Rate (USD)": best_match.get('burdenedLaborRateUsd', ''),
+                        "Similarity Score": 1 / (1 + distance)
+                    })
+                else:
+                    st.warning(f"No match found for item: {item.get('Family', '')} - {item.get('Type', '')}")
+            else:
+                st.warning(f"Failed to generate embedding for item: {item.get('Family', '')} - {item.get('Type', '')}")
 
-        st.subheader("Matching Results")
-        results_df = pd.DataFrame(results)
-        st.dataframe(results_df)
+        if results:
+            st.subheader("Matching Results")
+            results_df = pd.DataFrame(results)
+            st.dataframe(results_df)
 
-        csv = results_df.to_csv(index=False)
-        st.download_button(
-            label="Download Results CSV",
-            data=csv,
-            file_name="canvas_matching_results.csv",
-            mime="text/csv",
-        )
+            csv = results_df.to_csv(index=False)
+            st.download_button(
+                label="Download Results CSV",
+                data=csv,
+                file_name="canvas_matching_results.csv",
+                mime="text/csv",
+            )
+        else:
+            st.error("No matching results found. Please check your input data and try again.")
 
 def main():
     st.sidebar.title("RAG Demo App")
