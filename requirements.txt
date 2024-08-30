@@ -1,6 +1,6 @@
 streamlit
 faiss-cpu
-openai
+openai==0.28
 numpy
 pandas
 boto3
