@@ -3,3 +3,4 @@ faiss-cpu
 openai
 numpy
 pandas
+boto3
